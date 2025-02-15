@@ -6,6 +6,7 @@ import torch
 import torchvision.transforms as transforms
 from PIL import Image
 import torchvision.models as models
+from matplotlib import pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from gtda.homology import CubicalPersistence
 from gtda.diagrams import BettiCurve
@@ -37,36 +38,59 @@ def generate_betti_curves(diagrams):
     betti_curves = bc.fit_transform(diagrams)
     return betti_curves
 
-class BloodCellDataset(Dataset):
-    def __init__(self, root_dir, csv_file, transform=None):
+class BrainTumorDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
-        self.csv_file = csv_file
         self.transform = transform
-        self.data = pd.read_csv(csv_file)
+        self.image_paths = []
+        self.labels = []
+
+        yes_dir = os.path.join(root_dir, 'yes')
+        no_dir = os.path.join(root_dir, 'no')
+
+        for img_name in os.listdir(yes_dir):
+            if img_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                img_path = os.path.join(yes_dir, img_name)
+                self.image_paths.append(img_path)
+                self.labels.append(1)
+
+        for img_name in os.listdir(no_dir):
+            if img_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                img_path = os.path.join(no_dir, img_name)
+                self.image_paths.append(img_path)
+                self.labels.append(0)
+
 
     def __len__(self):
-        return len(self.data)
+        return len(self.image_paths)
 
     def __getitem__(self, idx):
-        img_name = os.path.join(self.root_dir, self.data.iloc[idx, 0])
-        image = Image.open(img_name).convert("RGB")
-        label = self.data.iloc[idx, 5]
+        img_path = self.image_paths[idx]
+        image = Image.open(img_path).convert("RGB")
+        label = self.labels[idx]
         if self.transform:
             image = self.transform(image)
-        lbl = 0 if label == 'rbc' else 1
-        return image, torch.tensor(lbl)
+        return image, torch.tensor(label)
+
 
 if __name__ == '__main__':
     model = models.resnet50(pretrained=True)
     num_classes = 2
 
-    sample_image = Image.open('./data/images/image-1.png').convert("RGB")
+    sample_image = Image.open('./images/yes/Y1.jpg').convert("RGB")
+    # plt.imshow(sample_image)
+    # plt.show()
+
     sample_transform = transforms.Compose([transforms.Resize((256, 256)), transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     sample_image = sample_transform(sample_image)
     sample_grayscale = convert_to_grayscale(sample_image)
     sample_diagrams = generate_cubical_persistence(sample_grayscale)
     sample_betti_curves = generate_betti_curves(sample_diagrams)
     betti_curve_size = sample_betti_curves.flatten().shape[0]
+
+    # for dim in range(sample_betti_curves.shape[1]):
+    #     plt.plot(sample_betti_curves[0, dim], label=f'Betti curve - Dimension {dim}')
+    # plt.show()
 
     class CombinedModel(torch.nn.Module):
         def __init__(self, resnet, betti_curve_size, num_classes):
@@ -91,7 +115,7 @@ if __name__ == '__main__':
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    dataset = BloodCellDataset(root_dir='./data/images', csv_file='./data/annotations.csv', transform=transform)
+    dataset = BrainTumorDataset(root_dir='./images', transform=transform)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
     # criterion = torch.nn.CrossEntropyLoss()
@@ -117,10 +141,10 @@ if __name__ == '__main__':
     #
     #         print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss / len(dataloader)}')
     #
-    # torch.save(model.state_dict(), 'blood_cell_model.pth')
-    # print("Model saved to blood_cell_model.pth")
+    # torch.save(model.state_dict(), 'brain_tumor.pth')
+    # print("Model saved to brain_tumor.pth")
 
-    model.load_state_dict(torch.load('blood_cell_model.pth'))
+    model.load_state_dict(torch.load('brain_tumor.pth'))
     model.eval()
 
     def get_random_image_from_dataloader(dataloader):
@@ -147,10 +171,8 @@ if __name__ == '__main__':
     _, predicted_idx = torch.max(output, 1)
     classifications = [0, 1]
     predicted_label = classifications[predicted_idx.item()]
-    predicted_label_name = 'rbc' if predicted_label == 0 else 'wbc'
     real_label = labels[0]
-    real_label_name = 'rbc' if real_label == 0 else 'wbc'
 
-    print(f"Predicted label: {predicted_label_name}, Real label: {real_label_name}, matching: {predicted_label == real_label}")
+    print(f"Predicted label: {predicted_label}, Real label: {real_label}, matching: {predicted_label == real_label}")
 
 
