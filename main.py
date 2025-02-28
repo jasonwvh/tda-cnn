@@ -39,9 +39,12 @@ def generate_betti_curves(diagrams):
     return betti_curves
 
 class BrainTumorDataset(Dataset):
-    def __init__(self, root_dir, transform=None):
+    def __init__(self, root_dir, transform=None, split='train', test_size=0.2):
         self.root_dir = root_dir
         self.transform = transform
+        self.split = split
+        self.test_size = test_size
+
         self.image_paths = []
         self.labels = []
 
@@ -60,6 +63,24 @@ class BrainTumorDataset(Dataset):
                 self.image_paths.append(img_path)
                 self.labels.append(0)
 
+        combined_data = list(zip(self.image_paths, self.labels))
+        random.shuffle(combined_data)
+        self.image_paths, self.labels = zip(*combined_data)
+
+        split_index = int(len(self.image_paths) * (1 - test_size))
+        train_image_paths = self.image_paths[:split_index]
+        train_labels = self.labels[:split_index]
+        test_image_paths = self.image_paths[split_index:]
+        test_labels = self.labels[split_index:]
+
+        if self.split == 'train':
+            self.image_paths = train_image_paths
+            self.labels = train_labels
+        elif self.split == 'test':
+            self.image_paths = test_image_paths
+            self.labels = test_labels
+        else:
+            raise ValueError("Split must be 'train' or 'test'")
 
     def __len__(self):
         return len(self.image_paths)
@@ -98,9 +119,6 @@ class ImageOnlyModel(torch.nn.Module):
         return output
 
 if __name__ == '__main__':
-    num_classes = 2
-    resnet50 = models.resnet50(pretrained=True)
-
     sample_image = Image.open('./images/yes/Y1.jpg').convert("RGB")
     # plt.imshow(sample_image)
     # plt.show()
@@ -117,51 +135,57 @@ if __name__ == '__main__':
     #     plt.plot(sample_betti_curves[0, dim], label=f'Betti curve - Dimension {dim}')
     # plt.show()
 
-    model = CombinedModel(resnet50, betti_curve_size, num_classes)
-
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    dataset = BrainTumorDataset(root_dir='./images', transform=transform)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+    train_dataset = BrainTumorDataset(root_dir='./images', transform=transform, split='train')
+    test_dataset = BrainTumorDataset(root_dir='./images', transform=transform, split='test')
 
+    train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+
+    num_classes = 2
+    num_epochs = 5
+    resnet50 = models.resnet50(pretrained=True)
+
+    # ----- training combined model ----- #
+    combined_model = CombinedModel(resnet50, betti_curve_size, num_classes)
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(combined_model.parameters(), lr=0.001)
 
-    num_epochs = 10
     for epoch in range(num_epochs):
-        model.train()
+        combined_model.train()
         running_loss = 0.0
-        for images, labels in dataloader:
+        for images, labels in train_dataloader:
             grayscale_image = convert_to_grayscale(images)
             diagrams = generate_cubical_persistence(grayscale_image)
             betti_curves = generate_betti_curves(diagrams)
-
             betti_curves_tensor = torch.tensor(betti_curves.flatten(), dtype=torch.float32).unsqueeze(0)
 
             optimizer.zero_grad()
-            outputs = model(images, betti_curves_tensor)
+            outputs = combined_model(images, betti_curves_tensor)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
 
-            print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss / len(dataloader)}')
+            print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss / len(train_dataloader)}')
 
-    torch.save(model.state_dict(), 'brain_tumor_ph.pth')
-    print("Model saved to brain_tumor.pth")
+    torch.save(combined_model.state_dict(), 'brain_tumor_ph.pth')
+    print("Combined Model saved to brain_tumor_ph.pth")
 
-    model.load_state_dict(torch.load('brain_tumor_ph.pth'))
-    model.eval()
-
+    # ----- training image-only model ----- #
     image_only_model = ImageOnlyModel(resnet50, num_classes)
+    criterion = torch.nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(image_only_model.parameters(), lr=0.001)
+
     for epoch in range(num_epochs):
         image_only_model.train()
         running_loss = 0.0
-        for images, labels in dataloader:
+        for images, labels in train_dataloader:
             optimizer.zero_grad()
             outputs = image_only_model(images)
             loss = criterion(outputs, labels)
@@ -169,17 +193,19 @@ if __name__ == '__main__':
             optimizer.step()
             running_loss += loss.item()
 
-            epoch_loss = running_loss / len(dataloader)
+            epoch_loss = running_loss / len(train_dataloader)
             print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {epoch_loss:.4f}')
 
     torch.save(image_only_model.state_dict(), 'brain_tumor_image_only.pth')
     print("Image-only model saved to brain_tumor_image_only.pth")
 
-    test_dataset = BrainTumorDataset(root_dir='./images', transform=transform)
-    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+    # ----- testing combined model ----- #
+    combined_model = CombinedModel(resnet50, betti_curve_size, num_classes)
+    combined_model.load_state_dict(torch.load('brain_tumor_ph.pth'))
+    combined_model.eval()
 
-    correct_predictions = 0
-    total_samples = 0
+    correct_predictions_combined = 0
+    total_samples_combined = 0
 
     with torch.no_grad():
         for images, labels in test_dataloader:
@@ -188,30 +214,30 @@ if __name__ == '__main__':
             betti_curves = generate_betti_curves(diagrams)
             betti_curves_tensor = torch.tensor(betti_curves.flatten(), dtype=torch.float32).unsqueeze(0)
 
-            outputs = model(images, betti_curves_tensor)
+            outputs = combined_model(images, betti_curves_tensor)
             _, predicted_labels = torch.max(outputs, 1)
 
-            total_samples += labels.size(0)
-            correct_predictions += (predicted_labels == labels).sum().item()
+            total_samples_combined += labels.size(0)
+            correct_predictions_combined += (predicted_labels == labels).sum().item()
 
-    accuracy = correct_predictions / total_samples
-    print(f'Accuracy of the model on the test images: {accuracy * 100:.2f}%')
+    accuracy_combined = correct_predictions_combined / total_samples_combined
+    print(f'Accuracy of the Combined Model on the test images: {accuracy_combined * 100:.2f}%')
 
+    # ----- testing image-only model ----- #
     image_only_model = ImageOnlyModel(resnet50, num_classes)
     image_only_model.load_state_dict(torch.load('brain_tumor_image_only.pth'))
     image_only_model.eval()
 
-    correct_predictions = 0
-    total_samples = 0
+    correct_predictions_image_only = 0
+    total_samples_image_only = 0
 
     with torch.no_grad():
         for images, labels in test_dataloader:
             outputs = image_only_model(images)
             _, predicted_labels = torch.max(outputs, 1)
 
-            total_samples += labels.size(0)
-            correct_predictions += (predicted_labels == labels).sum().item()
+            total_samples_image_only += labels.size(0)
+            correct_predictions_image_only += (predicted_labels == labels).sum().item()
 
-    accuracy = correct_predictions / total_samples
-    print(f'Accuracy of the Image-Only model on the test images: {accuracy * 100:.2f}%')
-
+    accuracy_image_only = correct_predictions_image_only / total_samples_image_only
+    print(f'Accuracy of the Image-Only model on the test images: {accuracy_image_only * 100:.2f}%')
